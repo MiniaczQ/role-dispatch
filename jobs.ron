@@ -1,0 +1,32 @@
+[
+    (
+        name: "Trader",
+        minimum: 1,
+        maximum: 1,
+        weight: 0,
+    ),
+    (
+        name: "Assistant",
+        minimum: 0,
+        maximum: 1,
+        weight: 20,
+    ),
+    (
+        name: "Wood Chopper",
+        minimum: 1,
+        maximum: 99,
+        weight: 20,
+    ),
+    (
+        name: "Diamond Miner",
+        minimum: 0,
+        maximum: 99,
+        weight: 20,
+    ),
+    (
+        name: "Nether Guy",
+        minimum: 0,
+        maximum: 99,
+        weight: 20,
+    ),
+]
