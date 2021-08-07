@@ -24,7 +24,8 @@ use commands::{
 };
 
 #[group("Speedrunning")]
-#[commands(roll)]
+//#[commands(roll)]
+#[commands(modify, remove, show, grant, revoke)]
 struct Speedrunning;
 
 #[help]

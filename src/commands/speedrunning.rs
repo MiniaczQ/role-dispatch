@@ -1,4 +1,4 @@
-use crate::model::{load_jobs, Job, QUALIFICATION_PREFIX};
+use crate::model::{Job, QUALIFICATION_PREFIX, load_jobs, save_jobs};
 use indexmap::{IndexMap, IndexSet};
 use rand::{distributions::{Uniform, WeightedIndex}, prelude::Distribution};
 use serenity::{
@@ -6,7 +6,7 @@ use serenity::{
     model::prelude::*,
     prelude::*,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fmt::Write, time::Duration};
 
 #[command]
 pub async fn roll(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
@@ -171,6 +171,29 @@ fn decide_pairings(
     jobs: &HashMap<RoleId, Job>,
     players: &HashMap<UserId, Vec<RoleId>>,
 ) -> Vec<(RoleId, UserId)> {
+    // Left players with available jobs
+    // Left jobs with available players, how many more players are required
+        // Start with minimal slots
+        // Remove jobs with maxed slots
+        // Normalize proportions for the remaining jobs
+        // Calculate fractional amounts
+            // If exceeding max bound, redistribute the reminder to other jobs
+        // Round fractions to the bottom for the new minimal amount
+            // Distribute the remaining players with the fractional part as the weight
+            // or
+            // Distribute starting from the highest remainign fractional part, until we run out
+        // Remove jobs with maxed slots
+
+    // Loop until all spots used:
+        // Find job with least players
+        // Choose it a (semi)random player
+        // Update jobs-players and players-jobs
+        // Remember the pairing in a map<job, vec<player>>
+
+    
+    
+    // Don't fuck it up
+
     let mut pairings: Vec<(RoleId, UserId)> = Vec::new();
     let mut left_jobs = jobs.iter().map(|(role_id, job)| {
         (role_id, (job, JobExt{
@@ -217,6 +240,7 @@ fn decide_pairings(
     pairings
 }
 
+/*
 fn remove_maxed_jobs(
     left_jobs: &mut IndexMap<&RoleId, (&Job, JobExt)>,
     left_players: &mut IndexMap<&UserId, IndexSet<RoleId>>,
@@ -229,9 +253,10 @@ fn remove_maxed_jobs(
         }
     }
     left_jobs.retain(|_, e| {e.1.assigned < e.0.maximum});
-}
+}*/
 
 /// Displays the distribution of roles.
+/*
 async fn display_pairings(
     ctx: &Context,
     guild: &Guild,
@@ -250,4 +275,216 @@ async fn display_pairings(
         .send_message(ctx, |m| m.content(content))
         .await
         .unwrap()
+}*/
+
+#[command]
+pub async fn modify(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    let guild = msg.guild(ctx).await.unwrap();
+    let response = match parse_args_to_job(args) {
+        Ok(job) => {
+            let mut jobs = load_jobs();
+            let job_name = job.name.clone();
+            let response = match jobs.insert(job.name.to_ascii_lowercase(), job) {
+                Some(previous_job) => {
+                    let role = guild.role_by_name(&previous_job.name).unwrap();
+                    role.edit(ctx, |e| {
+                        e.name(job_name)
+                    }).await.ok();
+                    "Role modified succesfully!".to_owned()
+                },
+                None => {
+                    guild.create_role(ctx, |e| {
+                        e.name(job_name)
+                    }).await.ok();
+                    "Role added succesfully!".to_owned()
+                },
+            };
+            save_jobs(jobs);
+            response
+        },
+        Err(e) => e,
+    };
+
+    let channels = guild.channels(ctx).await.unwrap();
+    let channel = channels.get(&msg.channel_id).unwrap();
+    channel.send_message(ctx, |m| {
+        m.content(response)
+    }).await.ok();
+
+    Ok(())
+}
+
+fn parse_args_to_job(mut args: Args) -> Result<Job, String> {
+    args.trimmed().quoted();
+    let name = match args.single::<String>() {
+        Ok(name) => name,
+        Err(_) => return Err("Invalid name".to_owned()),
+    };
+    let minimum = match args.single::<u32>() {
+        Ok(name) => name,
+        Err(_) => return Err("Invalid minimum (non-negative integer)".to_owned()),
+    };
+    let maximum = match args.single::<u32>() {
+        Ok(name) => name,
+        Err(_) => return Err("Invalid maximum (non-negative integer)".to_owned()),
+    };
+    let proportion = match args.single::<u64>() {
+        Ok(proportion) => proportion,
+        Err(_) => return Err("Invalid proportion (non-negative integer)".to_owned()),
+    };
+    return Ok(Job {
+        name,
+        minimum,
+        maximum,
+        proportion,
+    })
+}
+
+#[command]
+pub async fn remove(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    let guild = msg.guild(ctx).await.unwrap();
+    args.trimmed().quoted();
+    let response = match args.single::<String>() {
+        Ok(name) => {
+            let mut jobs = load_jobs();
+            let response = match jobs.remove(&name.to_lowercase()) {
+                Some(job) => {
+                    let role = guild.role_by_name(&job.name).unwrap();
+                    guild.delete_role(ctx, role.id).await.ok();
+                    "Role removed succesfully!".to_owned()
+                },
+                None => "No role with that name exists.".to_owned(),
+            };
+            save_jobs(jobs);
+            response
+        },
+        Err(_) => "Invalid name".to_owned(),
+    };
+
+    let guild = msg.guild(ctx).await.unwrap();
+    let channels = guild.channels(ctx).await.unwrap();
+    let channel = channels.get(&msg.channel_id).unwrap();
+    channel.send_message(ctx, |m| {
+        m.content(response)
+    }).await.ok();
+
+    Ok(())
+}
+
+#[command]
+pub async fn show(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
+    let jobs = load_jobs();
+    let mut response = String::new();
+    response.write_str("**Existing roles:**\n\n").ok();
+    for (_key, job) in jobs {
+        response.write_fmt(format_args!(
+            "***{}***\n> **Minimum**: {}\n> **Maximum**: {}\n> **Proportion**: {}\n\n",
+            job.name, job.minimum, job.maximum, job.proportion
+        )).ok();
+    }
+
+    let guild = msg.guild(ctx).await.unwrap();
+    let channels = guild.channels(ctx).await.unwrap();
+    let channel = channels.get(&msg.channel_id).unwrap();
+    channel.send_message(ctx, |m| {
+        m.content(response)
+    }).await.ok();
+
+    Ok(())
+}
+
+#[command]
+pub async fn grant(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    let guild = msg.guild(ctx).await.unwrap();
+    let jobs = load_jobs();
+    let mut member = msg.member(ctx).await.unwrap();
+    let mut invalid = Vec::<String>::new();
+    args.trimmed().quoted();
+    for _ in 0..args.len() {
+        let name = args.single::<String>().unwrap();
+        match jobs.get(&name.to_ascii_lowercase()) {
+            Some(_) => {
+                match guild.role_by_name(&name) {
+                    Some(role) => member.add_role(ctx, role.id).await.unwrap(),
+                    None => invalid.push(name),
+                }
+            }
+            None => {
+                invalid.push(name);
+            }
+        }
+    }
+
+    let response = match invalid.len() {
+        0 => "Roles were granted succesfully!".to_owned(),
+        _ => {
+            let mut response = String::new();
+            for s in invalid.iter() {
+                response.write_fmt(format_args!(
+                    "{} is not a valid role.\n",
+                    s
+                )).ok();
+            }
+            if args.len() != invalid.len() {
+                response.write_str("The rest of the roles were granted succesfully!").ok();
+            }
+            response
+        }
+    };
+    
+    let channels = guild.channels(ctx).await.unwrap();
+    let channel = channels.get(&msg.channel_id).unwrap();
+    channel.send_message(ctx, |m| {
+        m.content(response)
+    }).await.ok();
+
+    Ok(())
+}
+
+#[command]
+pub async fn revoke(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    let guild = msg.guild(ctx).await.unwrap();
+    let jobs = load_jobs();
+    let mut member = msg.member(ctx).await.unwrap();
+    let mut invalid = Vec::<String>::new();
+    args.trimmed().quoted();
+    for _ in 0..args.len() {
+        let name = args.single::<String>().unwrap();
+        match jobs.get(&name.to_ascii_lowercase()) {
+            Some(_) => {
+                match guild.role_by_name(&name) {
+                    Some(role) => member.remove_role(ctx, role.id).await.unwrap(),
+                    None => invalid.push(name),
+                }
+            },
+            None => {
+                invalid.push(name);
+            }
+        }
+    }
+
+    let response = match invalid.len() {
+        0 => "Roles were revoked succesfully!".to_owned(),
+        _ => {
+            let mut response = String::new();
+            for s in invalid.iter() {
+                response.write_fmt(format_args!(
+                    "{} is not a valid role.\n",
+                    s
+                )).ok();
+            }
+            if args.len() != invalid.len() {
+                response.write_str("The rest of the roles were revoked succesfully!").ok();
+            }
+            response
+        }
+    };
+    
+    let channels = guild.channels(ctx).await.unwrap();
+    let channel = channels.get(&msg.channel_id).unwrap();
+    channel.send_message(ctx, |m| {
+        m.content(response)
+    }).await.ok();
+
+    Ok(())
 }
