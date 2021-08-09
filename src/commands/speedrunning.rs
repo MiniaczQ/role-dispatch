@@ -9,57 +9,11 @@ use serenity::{
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
-    time::Duration,
 };
 
 #[command]
 pub async fn roll(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
-    let anchor = msg
-        .reply(ctx, "React with the dice to randomize roles!")
-        .await
-        .unwrap();
-    anchor
-        .react(ctx, ReactionType::Unicode("🎲".to_owned()))
-        .await
-        .unwrap();
-    anchor
-        .react(ctx, ReactionType::Unicode("❌".to_owned()))
-        .await
-        .unwrap();
-
-    let mut response: Option<Message> = None;
-
-    loop {
-        let result = anchor
-            .await_reaction(&ctx)
-            .timeout(Duration::from_secs(60 * 60))
-            .await;
-
-        if let Some(msg) = response {
-            msg.delete(ctx).await.unwrap();
-            response = None;
-        }
-
-        if let Some(reaction) = result {
-            let reaction = reaction.as_inner_ref();
-            let emoji = &reaction.emoji;
-            match emoji.as_data().as_str() {
-                "🎲" => {
-                    response = try_assigning(ctx, &msg, &anchor.channel_id).await;
-                }
-                "❌" => break,
-                _ => (),
-            };
-            reaction.delete(ctx).await.unwrap();
-        } else {
-            break;
-        };
-    }
-
-    anchor.delete(ctx).await.unwrap();
-    if let Some(msg) = response {
-        msg.delete(ctx).await.unwrap();
-    }
+    try_assigning(&ctx, &msg, &msg.channel_id).await;
 
     Ok(())
 }
@@ -67,7 +21,6 @@ pub async fn roll(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
 /// Decide role for every participating player
 async fn try_assigning(ctx: &Context, msg: &Message, channel_id: &ChannelId) -> Option<Message> {
     let guild = &msg.guild(ctx).await.unwrap();
-    msg.delete(ctx).await.ok();
     if let Some(voice_channel_id) = get_vc(guild, &msg.author.id).await {
         let jobs = get_jobs(guild);
         let players = get_players(ctx, guild, voice_channel_id, &jobs).await;
