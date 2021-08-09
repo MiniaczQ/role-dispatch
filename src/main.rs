@@ -1,4 +1,5 @@
 #![feature(bool_to_option)]
+#![feature(total_cmp)]
 
 mod model;
 mod commands;
@@ -24,8 +25,7 @@ use commands::{
 };
 
 #[group("Speedrunning")]
-//#[commands(roll)]
-#[commands(modify, remove, show, grant, revoke)]
+#[commands(modify, remove, show, grant, revoke, roll, simulate)]
 struct Speedrunning;
 
 #[help]

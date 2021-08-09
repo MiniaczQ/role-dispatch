@@ -1,12 +1,16 @@
-use crate::model::{Job, QUALIFICATION_PREFIX, load_jobs, save_jobs};
+use crate::model::{load_jobs, save_jobs, Job};
 use indexmap::{IndexMap, IndexSet};
-use rand::{distributions::{Uniform, WeightedIndex}, prelude::Distribution};
+use rand::{distributions::Uniform, prelude::Distribution};
 use serenity::{
     framework::standard::{macros::command, Args, CommandResult},
     model::prelude::*,
     prelude::*,
 };
-use std::{collections::HashMap, fmt::Write, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    time::Duration,
+};
 
 #[command]
 pub async fn roll(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
@@ -64,11 +68,11 @@ pub async fn roll(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
 async fn try_assigning(ctx: &Context, msg: &Message, channel_id: &ChannelId) -> Option<Message> {
     let guild = &msg.guild(ctx).await.unwrap();
     msg.delete(ctx).await.ok();
-    if let Some(vc_id) = get_vc(guild, &msg.author.id).await {
+    if let Some(voice_channel_id) = get_vc(guild, &msg.author.id).await {
         let jobs = get_jobs(guild);
-        let players = get_players(guild, vc_id, &jobs);
-        let pairings = decide_pairings(&jobs, &players);
-        return Some(display_pairings(ctx, guild, channel_id, &jobs, pairings).await);
+        let players = get_players(ctx, guild, voice_channel_id, &jobs).await;
+        let assigned = decide_pairings(&jobs, &players);
+        return Some(display_pairings(ctx, guild, channel_id, &jobs, assigned).await);
     }
     None
 }
@@ -96,19 +100,33 @@ fn get_players_in_vc(guild: &Guild, voice_channel_id: ChannelId) -> Vec<UserId> 
 }
 
 /// Returns all players roles.
-fn get_player_roles(guild: &Guild, player_ids: Vec<UserId>) -> HashMap<UserId, Vec<RoleId>> {
+async fn get_player_roles(
+    ctx: &Context,
+    guild: &Guild,
+    player_ids: Vec<UserId>,
+) -> HashMap<UserId, HashSet<RoleId>> {
+    //guild.id.member(&ctx.http, UserId::from(0)).await.unwrap().roles;
     let mut players_roles = HashMap::new();
-    let members = &guild.members;
+    let pg = guild.id.to_partial_guild(&ctx.http).await.unwrap();
     for player_id in player_ids {
-        let member = members.get(&player_id).unwrap();
-        players_roles.insert(player_id, member.roles.clone());
+        let member = pg.member(&ctx.http, &player_id).await.unwrap();
+        players_roles.insert(
+            player_id,
+            member
+                .roles(ctx)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|role| role.id)
+                .collect(),
+        );
     }
     players_roles
 }
 
 /// Removes qualifications that don't have jobs.
 fn remove_irrelevant_qualifications(
-    players: &mut HashMap<UserId, Vec<RoleId>>,
+    players: &mut HashMap<UserId, HashSet<RoleId>>,
     jobs: &HashMap<RoleId, Job>,
 ) {
     for (_id, roles) in players.iter_mut() {
@@ -116,43 +134,41 @@ fn remove_irrelevant_qualifications(
     }
 }
 
-/// All server roles that start with the qualified prefix.
-fn get_qualifying_roles(guild: &Guild) -> HashMap<RoleId, String> {
+/// All server roles.
+fn get_role_names(guild: &Guild) -> HashMap<RoleId, String> {
     let mut role_names = HashMap::new();
     for (role_id, role) in guild.roles.iter() {
-        if role.name.starts_with(QUALIFICATION_PREFIX) {
-            role_names.insert(
-                *role_id,
-                role.name[(QUALIFICATION_PREFIX.len())..].to_string(),
-            );
-        }
+        role_names.insert(*role_id, role.name.clone());
     }
     role_names
 }
 
 /// Jobs mapped by their corresponding role id.
 fn get_jobs(guild: &Guild) -> HashMap<RoleId, Job> {
-    let mut qualifying_roles = get_qualifying_roles(guild);
-    let jobs_vec = load_jobs();
-    let mut jobs_mapped = HashMap::new();
-    for job in jobs_vec {
-        let found = qualifying_roles.iter().find_map(|(id, name)| {job.name.eq(name).then_some(*id)});
-        if let Some(id) = found {
-            qualifying_roles.remove(&id);
-            jobs_mapped.insert(id, job);
-        }
-    }
-    jobs_mapped
+    let role_names = get_role_names(guild);
+    load_jobs()
+        .into_iter()
+        .filter_map(|(key, job)| {
+            match role_names
+                .iter()
+                .find(|(_role_id, name)| name.to_lowercase().eq(&key))
+            {
+                Some((role_id, _name)) => Some((*role_id, job)),
+                None => None,
+            }
+        })
+        .collect()
 }
 
 /// Players with only useful qualifications.
-fn get_players(
+async fn get_players(
+    ctx: &Context,
     guild: &Guild,
     voice_channel_id: ChannelId,
     jobs: &HashMap<RoleId, Job>,
-) -> HashMap<UserId, Vec<RoleId>> {
+) -> HashMap<UserId, HashSet<RoleId>> {
     let player_ids = get_players_in_vc(&guild, voice_channel_id);
-    let mut players = get_player_roles(&guild, player_ids);
+    let mut players = get_player_roles(ctx, guild, player_ids).await;
     remove_irrelevant_qualifications(&mut players, jobs);
     players
 }
@@ -165,117 +181,297 @@ struct JobExt {
 }
 
 /// Decide pairings.
-/// Start with Hungarian Algorithm to fill the minimums.
-/// Continue by random assignment.
+/// Decide how many of each role based on the proportions and limits
+/// Finish by applying last step of Hungarian Algorithm.
+/// Returns error if there was a problem during assignment.
 fn decide_pairings(
     jobs: &HashMap<RoleId, Job>,
-    players: &HashMap<UserId, Vec<RoleId>>,
-) -> Vec<(RoleId, UserId)> {
-    // Left players with available jobs
-    // Left jobs with available players, how many more players are required
-        // Start with minimal slots
-        // Remove jobs with maxed slots
-        // Normalize proportions for the remaining jobs
-        // Calculate fractional amounts
-            // If exceeding max bound, redistribute the reminder to other jobs
-        // Round fractions to the bottom for the new minimal amount
-            // Distribute the remaining players with the fractional part as the weight
-            // or
-            // Distribute starting from the highest remainign fractional part, until we run out
-        // Remove jobs with maxed slots
-
-    // Loop until all spots used:
-        // Find job with least players
-        // Choose it a (semi)random player
-        // Update jobs-players and players-jobs
-        // Remember the pairing in a map<job, vec<player>>
-
-    
-    
-    // Don't fuck it up
-
-    let mut pairings: Vec<(RoleId, UserId)> = Vec::new();
-    let mut left_jobs = jobs.iter().map(|(role_id, job)| {
-        (role_id, (job, JobExt{
-            at_least: job.minimum,
-            assigned: 0,
-            players: players.iter().filter_map(|(player_id, roles)| {
-                roles.iter().find(|id| (*id).eq(role_id)).is_some().then_some(*player_id)
-            }).collect(),
-        }))
-    }).collect::<IndexMap<_, _>>();
-    let mut left_players = players.iter().map(|e| {(e.0, e.1.iter().copied().collect::<IndexSet<_>>())}).collect::<IndexMap<_, _>>();
-    let mut rng = rand::thread_rng();
-    // Fill minimums
-    let minimum: u32 = left_jobs.iter().map(|e| {e.1.1.at_least}).sum();
-    for _ in (0..minimum).rev() {
-        let e = left_jobs.iter_mut().filter(|e| {e.1.1.at_least > 0}).min_by_key(|e| {e.1.1.players.len()}).unwrap();
-        e.1.1.at_least -= 1;
-        e.1.1.assigned += 1;
-        let job_id = **e.0;
-        let left = e.1.1.players.len();
-        let player = *e.1.1.players.get_index(Uniform::from(0..left).sample(&mut rng) as usize).unwrap();
-        for job in left_jobs.iter_mut() {
-            job.1.1.players.remove(&player);
-        }
-        left_players.remove(&player);
-        pairings.push((job_id, player));
+    players: &HashMap<UserId, HashSet<RoleId>>,
+) -> Result<IndexMap<RoleId, Vec<UserId>>, String> {
+    /// Variables required for assigning jobs.
+    #[derive(Debug)]
+    struct AssigningJob {
+        needed: u32,
+        leftovers: f64,
+        players: IndexSet<UserId>,
     }
-    remove_maxed_jobs(&mut left_jobs, &mut left_players);
-    // Use up the rest of players
-    for left in (0..left_players.len()).rev() {
-        let player = left_players.get_index(Uniform::from(0..(left+1)).sample(&mut rng) as usize).unwrap();
-        let dist = WeightedIndex::new(player.1.iter().map(|e| {left_jobs.get(e).unwrap().0.weight})).unwrap();
-        let job_id = *player.1.get_index(dist.sample(&mut rng)).unwrap();
-        let e = left_jobs.get_mut(&job_id).unwrap();
-        e.1.assigned += 1;
-        for job in left_jobs.iter_mut() {
-            job.1.1.players.remove(*player.0);
+
+    /// Variables required for assigning players.
+    #[derive(Debug)]
+    struct AssigningPlayer {}
+
+    /// Assigns a player to a job.
+    /// Update all the variables.
+    /// Remove used players and jobs.
+    fn assign(
+        assigned: &mut IndexMap<RoleId, Vec<UserId>>,
+        left_jobs: &mut IndexMap<RoleId, AssigningJob>,
+        left_players: &mut IndexMap<UserId, AssigningPlayer>,
+        role_id: RoleId,
+        user_id: UserId,
+    ) {
+        // Update `assigned`
+        if let Some(vec) = match assigned.get_mut(&role_id) {
+            Some(vec) => {
+                vec.push(user_id);
+                None
+            }
+            None => {
+                let mut vec = Vec::new();
+                vec.push(user_id);
+                Some(vec)
+            }
+        } {
+            assigned.insert(role_id, vec);
+        };
+        // Update `left_jobs`
+        let job = left_jobs.get_mut(&role_id).unwrap();
+        job.needed -= 1;
+        if job.needed <= 0 {
+            left_jobs.remove(&role_id);
         }
-        let player_id = **player.0;
-        left_players.remove(&player_id);
-        pairings.push((job_id, player_id));
-        remove_maxed_jobs(&mut left_jobs, &mut left_players);
+        left_jobs.iter_mut().for_each(|(_role_id, job)| {
+            job.players.remove(&user_id);
+        });
+        // Update `left_players`
+        left_players.remove(&user_id);
     }
-    pairings
+
+    // Initialize assignment variables
+    let mut assigned: IndexMap<RoleId, Vec<UserId>> = IndexMap::new();
+    let mut left_jobs: IndexMap<RoleId, AssigningJob> = jobs
+        .iter()
+        .map(|(role_id, job)| {
+            (
+                *role_id,
+                AssigningJob {
+                    needed: job.minimum,
+                    leftovers: 0.,
+                    players: players
+                        .iter()
+                        .filter_map(|(user_id, roles)| {
+                            roles.get(role_id).is_some().then_some(*user_id)
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    let mut for_assignment: IndexMap<RoleId, AssigningJob> = IndexMap::new();
+    let rng = &mut rand::thread_rng();
+
+    //{
+    //    println!("Step 1");
+    //    println!("Left jobs:");
+    //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //    println!("For assignment:");
+    //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //}
+
+    // Calculate leftovers
+    let mut players_left = players.len() as u32;
+    let req_for_minimums = left_jobs
+        .iter()
+        .map(|(_role_id, job)| job.needed)
+        .sum::<u32>();
+
+    //{
+    //    println!("Step 2");
+    //    println!("Left jobs:");
+    //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //    println!("For assignment:");
+    //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //}
+    
+    // Remove maxed jobs
+    left_jobs = left_jobs
+        .into_iter()
+        .filter_map(|(role_id, job)| {
+            if jobs.get(&role_id).unwrap().maximum <= job.needed {
+                for_assignment.insert(role_id, job);
+                None
+            } else {
+                Some((role_id, job))
+            }
+        })
+        .collect();
+    
+    //{
+    //    println!("Step 3");
+    //    println!("Left jobs:");
+    //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //    println!("For assignment:");
+    //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //}
+    
+    // Check if there is enough players to meet the minimum
+    if req_for_minimums > players_left {
+        return Err("Not enough players to satisfy the minimal requirements.".to_owned());
+    }
+    players_left -= req_for_minimums;
+    let mut pool = players_left as f64;
+    while pool > 0.00001 {
+        // Check if no jobs left, maximums are too low
+        if left_jobs.len() == 0 {
+            return Err("Too many players to satisfy the maximal requirements.".to_owned());
+        }
+        //{
+        //    println!("Step 4a");
+        //    println!("Left jobs:");
+        //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+        //    println!("For assignment:");
+        //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+        //}
+        // Assign leftovers
+        let normalizer: f64 = left_jobs
+            .iter()
+            .map(|(role_id, _job)| jobs.get(role_id).unwrap().proportion)
+            .sum();
+        left_jobs.iter_mut().for_each(|(role_id, job)| {
+            job.leftovers += pool * jobs.get(role_id).unwrap().proportion / normalizer;
+        });
+        pool = 0.;
+        //{
+        //    println!("Step 4b");
+        //    println!("Left jobs:");
+        //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+        //    println!("For assignment:");
+        //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+        //}
+        // Reduce to maximums
+        left_jobs = left_jobs
+            .into_iter()
+            .filter_map(|(role_id, mut job)| {
+                let maximum = jobs.get(&role_id).unwrap().maximum;
+                let available = (maximum - job.needed) as f64;
+                if available < job.leftovers {
+                    pool += job.leftovers - available;
+                    job.leftovers = 0.;
+                    players_left -= maximum - job.needed;
+                    job.needed = maximum;
+                    for_assignment.insert(role_id, job);
+                    None
+                } else {
+                    let change = job.leftovers.trunc() as u32;
+                    players_left -= change;
+                    job.needed += change;
+                    job.leftovers = job.leftovers.fract();
+                    Some((role_id, job))
+                }
+            })
+            .collect();
+        
+        //{
+        //    println!("Step 4c");
+        //    println!("Left jobs:");
+        //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+        //    println!("For assignment:");
+        //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+        //}
+    }
+    //{
+    //    println!("Step 5");
+    //    println!("Left jobs:");
+    //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //    println!("For assignment:");
+    //    for_assignment.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //}
+    // Distribute based on the remaining fractions
+    // Check if too many players
+    if left_jobs.len() < players_left as usize {
+        return Err("Too many players to satisfy the maximal requirements.".to_owned());
+    }
+    for _ in 0..players_left {
+        let (role_id, _job) = left_jobs
+            .iter_mut()
+            .max_by(|(_role_id_a, job_a), (_role_id_b, job_b)| {
+                job_a.leftovers.total_cmp(&job_b.leftovers)
+            })
+            .unwrap();
+        let role_id = *role_id;
+        let mut job = left_jobs.remove(&role_id).unwrap();
+        job.leftovers = 0.;
+        job.needed += 1;
+        for_assignment.insert(role_id, job);
+    }
+    left_jobs.into_iter().for_each(|(role_id, mut job)| {
+        job.leftovers = 0.;
+        for_assignment.insert(role_id, job);
+    });
+    let mut left_jobs = for_assignment;
+    //{
+    //    println!("Step 6");
+    //    println!("Left jobs:");
+    //    left_jobs.iter().for_each(|(role_id, job)| {println!("{}: {:?}", jobs.get(role_id).unwrap().name, job)});
+    //}
+    // Initialize more assignment variables
+    let mut left_players: IndexMap<UserId, AssigningPlayer> = players
+        .iter()
+        .map(|(user_id, _roles)| (*user_id, AssigningPlayer {}))
+        .collect();
+    // Assign players to roles
+    for _ in 0..left_players.len() {
+        let (role_id, job) = left_jobs
+            .iter()
+            .filter(|(_role_id, job)| job.needed > 0)
+            .min_by_key(|(_role_id, job)| job.players.len())
+            .unwrap();
+        let role_id = *role_id;
+        let available = job.players.len();
+        // Check if any players are available
+        if available == 0 {
+            return Err(format!(
+                "Not enough players qualified for role: {}",
+                jobs.get(&role_id).unwrap().name
+            ));
+        }
+        let user_id = *job
+            .players
+            .get_index(Uniform::from(0..available).sample(rng))
+            .unwrap();
+        assign(
+            &mut assigned,
+            &mut left_jobs,
+            &mut left_players,
+            role_id,
+            user_id,
+        );
+    }
+    Ok(assigned)
 }
 
-/*
-fn remove_maxed_jobs(
-    left_jobs: &mut IndexMap<&RoleId, (&Job, JobExt)>,
-    left_players: &mut IndexMap<&UserId, IndexSet<RoleId>>,
-) {
-    for e in left_jobs.iter() {
-        if e.1.1.assigned >= e.1.0.maximum {
-            for player in left_players.iter_mut() {
-                player.1.remove(*e.0);
-            }
-        }
-    }
-    left_jobs.retain(|_, e| {e.1.assigned < e.0.maximum});
-}*/
-
-/// Displays the distribution of roles.
-/*
+/// Displays the distribution of roles or the error.
 async fn display_pairings(
     ctx: &Context,
     guild: &Guild,
     channel_id: &ChannelId,
     jobs: &HashMap<RoleId, Job>,
-    mut pairings: Vec<(RoleId, UserId)>,
+    assigned: Result<IndexMap<RoleId, Vec<UserId>>, String>,
 ) -> Message {
     let channel = guild.channels.get(channel_id).unwrap();
-    let mut content = String::new();
-    pairings.sort_by(|a, b| a.0.cmp(&b.0));
-    for (role_id, user_id) in pairings {
-        content += &format!("<@{}>: {}\n", user_id, jobs.get(&role_id).unwrap().name);
-    }
+    let content = match assigned {
+        Ok(mut assigned) => {
+            let mut content = String::new();
+            assigned.sort_keys();
+            assigned.into_iter().for_each(|(role_id, players)| {
+                content
+                    .write_fmt(format_args!("**{}**:\n", jobs.get(&role_id).unwrap().name))
+                    .ok();
+                players.into_iter().for_each(|user_id| {
+                    content.write_fmt(format_args!("> <@{}>\n", user_id)).ok();
+                });
+                content.write_str("\n").ok();
+            });
+            content
+        }
+        Err(s) => s,
+    };
 
     channel
         .send_message(ctx, |m| m.content(content))
         .await
         .unwrap()
-}*/
+}
 
 #[command]
 pub async fn modify(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
@@ -287,29 +483,26 @@ pub async fn modify(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             let response = match jobs.insert(job.name.to_ascii_lowercase(), job) {
                 Some(previous_job) => {
                     let role = guild.role_by_name(&previous_job.name).unwrap();
-                    role.edit(ctx, |e| {
-                        e.name(job_name)
-                    }).await.ok();
+                    role.edit(ctx, |e| e.name(job_name)).await.ok();
                     "Role modified succesfully!".to_owned()
-                },
+                }
                 None => {
-                    guild.create_role(ctx, |e| {
-                        e.name(job_name)
-                    }).await.ok();
+                    guild.create_role(ctx, |e| e.name(job_name)).await.ok();
                     "Role added succesfully!".to_owned()
-                },
+                }
             };
             save_jobs(jobs);
             response
-        },
+        }
         Err(e) => e,
     };
 
     let channels = guild.channels(ctx).await.unwrap();
     let channel = channels.get(&msg.channel_id).unwrap();
-    channel.send_message(ctx, |m| {
-        m.content(response)
-    }).await.ok();
+    channel
+        .send_message(ctx, |m| m.content(response))
+        .await
+        .ok();
 
     Ok(())
 }
@@ -328,16 +521,16 @@ fn parse_args_to_job(mut args: Args) -> Result<Job, String> {
         Ok(name) => name,
         Err(_) => return Err("Invalid maximum (non-negative integer)".to_owned()),
     };
-    let proportion = match args.single::<u64>() {
+    let proportion = match args.single::<f64>() {
         Ok(proportion) => proportion,
-        Err(_) => return Err("Invalid proportion (non-negative integer)".to_owned()),
+        Err(_) => return Err("Invalid proportion (non-negative)".to_owned()),
     };
     return Ok(Job {
         name,
         minimum,
         maximum,
         proportion,
-    })
+    });
 }
 
 #[command]
@@ -352,21 +545,22 @@ pub async fn remove(ctx: &Context, msg: &Message, mut args: Args) -> CommandResu
                     let role = guild.role_by_name(&job.name).unwrap();
                     guild.delete_role(ctx, role.id).await.ok();
                     "Role removed succesfully!".to_owned()
-                },
+                }
                 None => "No role with that name exists.".to_owned(),
             };
             save_jobs(jobs);
             response
-        },
+        }
         Err(_) => "Invalid name".to_owned(),
     };
 
     let guild = msg.guild(ctx).await.unwrap();
     let channels = guild.channels(ctx).await.unwrap();
     let channel = channels.get(&msg.channel_id).unwrap();
-    channel.send_message(ctx, |m| {
-        m.content(response)
-    }).await.ok();
+    channel
+        .send_message(ctx, |m| m.content(response))
+        .await
+        .ok();
 
     Ok(())
 }
@@ -377,18 +571,21 @@ pub async fn show(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
     let mut response = String::new();
     response.write_str("**Existing roles:**\n\n").ok();
     for (_key, job) in jobs {
-        response.write_fmt(format_args!(
-            "***{}***\n> **Minimum**: {}\n> **Maximum**: {}\n> **Proportion**: {}\n\n",
-            job.name, job.minimum, job.maximum, job.proportion
-        )).ok();
+        response
+            .write_fmt(format_args!(
+                "***{}***\n> **Minimum**: {}\n> **Maximum**: {}\n> **Proportion**: {}\n\n",
+                job.name, job.minimum, job.maximum, job.proportion
+            ))
+            .ok();
     }
 
     let guild = msg.guild(ctx).await.unwrap();
     let channels = guild.channels(ctx).await.unwrap();
     let channel = channels.get(&msg.channel_id).unwrap();
-    channel.send_message(ctx, |m| {
-        m.content(response)
-    }).await.ok();
+    channel
+        .send_message(ctx, |m| m.content(response))
+        .await
+        .ok();
 
     Ok(())
 }
@@ -403,12 +600,10 @@ pub async fn grant(ctx: &Context, msg: &Message, mut args: Args) -> CommandResul
     for _ in 0..args.len() {
         let name = args.single::<String>().unwrap();
         match jobs.get(&name.to_ascii_lowercase()) {
-            Some(_) => {
-                match guild.role_by_name(&name) {
-                    Some(role) => member.add_role(ctx, role.id).await.unwrap(),
-                    None => invalid.push(name),
-                }
-            }
+            Some(_) => match guild.role_by_name(&name) {
+                Some(role) => member.add_role(ctx, role.id).await.unwrap(),
+                None => invalid.push(name),
+            },
             None => {
                 invalid.push(name);
             }
@@ -420,23 +615,25 @@ pub async fn grant(ctx: &Context, msg: &Message, mut args: Args) -> CommandResul
         _ => {
             let mut response = String::new();
             for s in invalid.iter() {
-                response.write_fmt(format_args!(
-                    "{} is not a valid role.\n",
-                    s
-                )).ok();
+                response
+                    .write_fmt(format_args!("{} is not a valid role.\n", s))
+                    .ok();
             }
             if args.len() != invalid.len() {
-                response.write_str("The rest of the roles were granted succesfully!").ok();
+                response
+                    .write_str("The rest of the roles were granted succesfully!")
+                    .ok();
             }
             response
         }
     };
-    
+
     let channels = guild.channels(ctx).await.unwrap();
     let channel = channels.get(&msg.channel_id).unwrap();
-    channel.send_message(ctx, |m| {
-        m.content(response)
-    }).await.ok();
+    channel
+        .send_message(ctx, |m| m.content(response))
+        .await
+        .ok();
 
     Ok(())
 }
@@ -451,11 +648,9 @@ pub async fn revoke(ctx: &Context, msg: &Message, mut args: Args) -> CommandResu
     for _ in 0..args.len() {
         let name = args.single::<String>().unwrap();
         match jobs.get(&name.to_ascii_lowercase()) {
-            Some(_) => {
-                match guild.role_by_name(&name) {
-                    Some(role) => member.remove_role(ctx, role.id).await.unwrap(),
-                    None => invalid.push(name),
-                }
+            Some(_) => match guild.role_by_name(&name) {
+                Some(role) => member.remove_role(ctx, role.id).await.unwrap(),
+                None => invalid.push(name),
             },
             None => {
                 invalid.push(name);
@@ -468,23 +663,80 @@ pub async fn revoke(ctx: &Context, msg: &Message, mut args: Args) -> CommandResu
         _ => {
             let mut response = String::new();
             for s in invalid.iter() {
-                response.write_fmt(format_args!(
-                    "{} is not a valid role.\n",
-                    s
-                )).ok();
+                response
+                    .write_fmt(format_args!("{} is not a valid role.\n", s))
+                    .ok();
             }
             if args.len() != invalid.len() {
-                response.write_str("The rest of the roles were revoked succesfully!").ok();
+                response
+                    .write_str("The rest of the roles were revoked succesfully!")
+                    .ok();
             }
             response
         }
     };
-    
+
     let channels = guild.channels(ctx).await.unwrap();
     let channel = channels.get(&msg.channel_id).unwrap();
-    channel.send_message(ctx, |m| {
-        m.content(response)
-    }).await.ok();
+    channel
+        .send_message(ctx, |m| m.content(response))
+        .await
+        .ok();
 
     Ok(())
+}
+
+#[command]
+pub async fn simulate(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    let guild = msg.guild(ctx).await.unwrap();
+
+    args.trimmed().quoted();
+    let content = match args.single::<u32>() {
+        Ok(count) => {
+            let jobs = get_jobs(&guild);
+            let players = simulate_players(&jobs, count);
+            match decide_pairings(&jobs, &players) {
+                Ok(mut assigned) => {
+                    let mut content = String::new();
+                    content.write_str("Simulation succedeed:\n").ok();
+                    assigned.sort_keys();
+                    assigned.into_iter().for_each(|(role_id, players)| {
+                        content
+                            .write_fmt(format_args!(
+                                "**{}**: {}\n",
+                                jobs.get(&role_id).unwrap().name,
+                                players.len()
+                            ))
+                            .ok();
+                    });
+                    content
+                }
+                Err(s) => {
+                    let mut content = String::new();
+                    content
+                        .write_fmt(format_args!("Simulation failed:\n{}", s))
+                        .ok();
+                    content
+                }
+            }
+        }
+        Err(_) => "Invalid amount (non-negative integer)".to_owned(),
+    };
+
+    let channels = guild.channels(ctx).await.unwrap();
+    let channel = channels.get(&msg.channel_id).unwrap();
+    channel.send_message(ctx, |m| m.content(content)).await.ok();
+
+    Ok(())
+}
+
+fn simulate_players(jobs: &HashMap<RoleId, Job>, count: u32) -> HashMap<UserId, HashSet<RoleId>> {
+    let mut players = HashMap::new();
+    for i in 0..count {
+        players.insert(
+            UserId::from(i as u64),
+            jobs.iter().map(|(role_id, _job)| *role_id).collect(),
+        );
+    }
+    players
 }

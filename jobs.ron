@@ -1,14 +1,32 @@
 {
-    "assistant": (
-        name: "Assistant",
-        minimum: 0,
-        maximum: 1,
-        proportion: 1,
+    "diamond miner": (
+        name: "Diamond Miner",
+        minimum: 1,
+        maximum: 2,
+        proportion: 5,
+    ),
+    "nether": (
+        name: "Nether",
+        minimum: 1,
+        maximum: 3,
+        proportion: 2,
     ),
     "trader": (
         name: "Trader",
         minimum: 1,
         maximum: 1,
         proportion: 0,
+    ),
+    "wood chopper": (
+        name: "Wood Chopper",
+        minimum: 1,
+        maximum: 100,
+        proportion: 15,
+    ),
+    "assistant": (
+        name: "Assistant",
+        minimum: 0,
+        maximum: 1,
+        proportion: 3,
     ),
 }

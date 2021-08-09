@@ -1,21 +1,17 @@
 use std::{
     collections::HashMap,
-    fmt::Display,
     fs::{File, OpenOptions},
 };
 
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
-/// Qualification prefix
-pub const QUALIFICATION_PREFIX: &str = "Qualified ";
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Job {
     pub name: String,
     pub minimum: u32,
     pub maximum: u32,
-    pub proportion: u64,
+    pub proportion: f64,
 }
 
 /// Path to the job configuration file.
