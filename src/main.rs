@@ -1,6 +1,3 @@
-#![feature(bool_to_option)]
-#![feature(total_cmp)]
-
 mod model;
 mod commands;
 

@@ -8,10 +8,13 @@ use serenity::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Write,
+    fmt::Write, cmp::Ordering,
 };
 
-use super::util::{get_callers_vc, get_members_in_vc, get_users_roles, remove_irrelevant_qualifications, remove_excluded};
+use super::util::{
+    get_callers_vc, get_members_in_vc, get_users_roles, remove_excluded,
+    remove_irrelevant_qualifications,
+};
 
 #[command]
 #[aliases("r")]
@@ -119,7 +122,11 @@ pub fn decide_pairings(
                     players: users_roles
                         .iter()
                         .filter_map(|(user_id, roles)| {
-                            roles.get(&RoleId(*role_id)).is_some().then_some(*user_id)
+                            if roles.get(&RoleId(*role_id)).is_some() {
+                                Some(*user_id)
+                            } else {
+                                None
+                            }
                         })
                         .collect(),
                 },
@@ -135,7 +142,10 @@ pub fn decide_pairings(
         let (role_id, _job) = left_jobs
             .iter_mut()
             .max_by(|(_role_id_a, job_a), (_role_id_b, job_b)| {
-                job_a.leftovers.total_cmp(&job_b.leftovers)
+                job_a
+                    .leftovers
+                    .partial_cmp(&job_b.leftovers)
+                    .unwrap_or(Ordering::Equal)
             })
             .unwrap();
         let role_id = *role_id;
@@ -190,26 +200,27 @@ async fn display_pairings(
 ) -> Message {
     let roles = msg.guild_id.unwrap().roles(&ctx.http).await.unwrap();
     let content = match assigned {
-        Ok(mut assigned) => {
-            match assigned.len() {
-                0 => "No players.".to_owned(),
-                _ => {
-                    let mut content = String::new();
-                    assigned.sort_keys();
-                    assigned.into_iter().for_each(|(role_id, players)| {
-                        content
-                            .write_fmt(format_args!("{}:\n", roles.get(&role_id).unwrap().name))
-                            .ok();
-                        players.into_iter().for_each(|user_id| {
-                            content.write_fmt(format_args!("- <@{}>,\n", user_id)).ok();
-                        });
-                        content.write_str("\n").ok();
-                    });
+        Ok(mut assigned) => match assigned.len() {
+            0 => "No players.".to_owned(),
+            _ => {
+                let mut content = String::new();
+                assigned.sort_keys();
+                assigned.into_iter().for_each(|(role_id, players)| {
                     content
-                },
+                        .write_fmt(format_args!("{}:\n", roles.get(&role_id).unwrap().name))
+                        .ok();
+                    players.into_iter().for_each(|user_id| {
+                        content.write_fmt(format_args!("- <@{}>,\n", user_id)).ok();
+                    });
+                    content.write_str("\n").ok();
+                });
+                content
             }
-        }
-        Err(role_id) => format!("Not enough players qualified for role '{}'.", roles.get(&role_id).unwrap().name),
+        },
+        Err(role_id) => format!(
+            "Not enough players qualified for role '{}'.",
+            roles.get(&role_id).unwrap().name
+        ),
     };
 
     msg.channel_id.say(&ctx.http, content).await.unwrap()
