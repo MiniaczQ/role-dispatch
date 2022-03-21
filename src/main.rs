@@ -21,11 +21,15 @@ use std::{
 };
 
 use commands::{
-    speedrunning::*,
+    roles::*,
+    stages::*,
+    roll::*,
+    exclude::*,
+    simulate::*,
 };
 
 #[group("Speedrunning")]
-#[commands(modify, remove, show, grant, revoke, roll, simulate)]
+#[commands(roles, roll, stages, exclude, simulate)]
 struct Speedrunning;
 
 #[help]
@@ -85,4 +89,3 @@ async fn main() {
         println!("Client error: {:?}", why);
     }
 }
-

@@ -1,32 +1,32 @@
 {
-    "diamond miner": (
-        name: "Diamond Miner",
-        minimum: 0,
-        maximum: 2,
-        proportion: 5,
+    874798472346349588: (
+        points: {
+            6: 1,
+            4: 1,
+        },
     ),
-    "wood chopper": (
-        name: "Wood Chopper",
-        minimum: 0,
-        maximum: 100,
-        proportion: 15,
+    874798494198673420: (
+        points: {
+            6: 3,
+            4: 1,
+        },
     ),
-    "assistant": (
-        name: "Assistant",
-        minimum: 0,
-        maximum: 1,
-        proportion: 3,
+    875082658848317491: (
+        points: {
+            6: 1,
+            4: 1,
+        },
     ),
-    "nether": (
-        name: "Nether",
-        minimum: 0,
-        maximum: 3,
-        proportion: 2,
+    874798517535780895: (
+        points: {
+            6: 1,
+            4: 1,
+        },
     ),
-    "trader": (
-        name: "Trader",
-        minimum: 1,
-        maximum: 1,
-        proportion: 0,
+    874811917112315934: (
+        points: {
+            6: 0,
+            4: 0,
+        },
     ),
 }
