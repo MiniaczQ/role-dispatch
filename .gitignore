@@ -1,3 +1,4 @@
 /target
 /linux_target
 jobs.ron
+.env
